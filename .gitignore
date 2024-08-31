@@ -1,3 +1,4 @@
 snemi/
 *.pt
 *.torch
+checkpoints/
