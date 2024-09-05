@@ -2,3 +2,4 @@ snemi/
 *.pt
 *.torch
 checkpoints/
+model_checkpoints/
