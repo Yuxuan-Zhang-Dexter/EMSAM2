@@ -3,3 +3,4 @@ snemi/
 *.torch
 checkpoints/
 model_checkpoints/
+Cutie/
