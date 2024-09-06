@@ -197,7 +197,7 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
             print(f"Average Validation Loss: {avg_val_loss}")
 
         # Save model checkpoint every 100 epochs
-        if (epoch + 1) % 100 == 0:
+        if (epoch + 1) % 1000 == 0:
             output_dir = f"./model_checkpoints/large_model/epoch_{epoch+1}"
             os.makedirs(output_dir, exist_ok=True)
             model.module.save_pretrained(output_dir)  # Save model
