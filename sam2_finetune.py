@@ -16,6 +16,9 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 data_dir = Path("./snemi/")
 raw_image_dir = data_dir / 'image_pngs'
 seg_image_dir = data_dir / 'seg_pngs'
+train_loss_filename = "sam_train_loss_full.txt"
+val_loss_filename = "sam_val_loss_full.txt"
+log_dir="./logs"
 sam2_checkpoint = "./sam2_hiera_large.pt"
 model_cfg = "./sam2_hiera_l.yaml"
 itrs = 10000
@@ -78,17 +81,38 @@ def set_training_mode(predictor):
     predictor.model.sam_prompt_encoder.train(True)
     predictor.model.image_encoder.train(True)
 
+def mask_to_logits(mask, epsilon=1e-6):
+    """
+    Convert binary mask to mask logits.
+
+    Args:
+        mask (torch.Tensor or np.ndarray): A binary mask tensor with values in {0, 1}.
+        epsilon (float): A small value to prevent division by zero.
+    
+    Returns:
+        torch.Tensor: The corresponding logits.
+    """
+    # Ensure the mask is in float32 and has values in range [0, 1]
+    mask = mask.astype(np.float32)
+    
+    # Apply the logit function: log(p / (1 - p))
+    logits = np.log(mask + epsilon) - np.log(1 - mask + epsilon)
+    
+    return logits
+
+
 def resize_masks_opencv(mask, output_size=(256, 256)):
     """
     Reshapes the input NumPy array by selecting the first of the 3 redundant channels,
     then resizes each mask to the given output size using nearest-neighbor interpolation.
+    After resizing, the binary masks (0 and 1) are converted to logits.
 
     Args:
     - mask (np.ndarray): Array of shape (223, 1024, 1024, 3).
     - output_size (tuple): Desired output size (H, W) for the mask. Default is (256, 256).
 
     Returns:
-    - resized_masks: Resized masks of shape (223, 1, 256, 256).
+    - resized_mask_logits: Resized mask logits of shape (223, 1, 256, 256).
     """
     # Select the first channel (shape becomes (223, 1024, 1024))
     masks_single_channel = mask[..., 0]
@@ -102,11 +126,18 @@ def resize_masks_opencv(mask, output_size=(256, 256)):
     # Loop over each mask and resize using cv2.resize with nearest-neighbor interpolation
     for i in range(reshaped_masks.shape[0]):
         resized_masks[i, 0, :, :] = cv2.resize(reshaped_masks[i, 0, :, :], output_size, interpolation=cv2.INTER_NEAREST)
+
+    # Convert the resized binary masks (0 and 1) to mask logits
+    resized_mask_logits = np.zeros_like(resized_masks, dtype=np.float32)
+    for i in range(resized_masks.shape[0]):
+        resized_mask_logits[i, 0, :, :] = mask_to_logits(resized_masks[i, 0, :, :])
     
-    return resized_masks
+    return resized_mask_logits
 
 # - Training Loop
-def train_model(predictor, data, itrs, optimizer, scaler):
+def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
+    train_loss_file = open(os.path.join(log_dir, train_loss_filename), "w")
+    val_loss_file = open(os.path.join(log_dir, val_loss_filename), "w")
     for itr in range(itrs):
         with torch.amp.autocast(device_type=DEVICE):
             image, mask, input_point, input_boxes, input_label = read_batch(data)
@@ -154,14 +185,49 @@ def train_model(predictor, data, itrs, optimizer, scaler):
 
             # Save model every 1000 iterations
             if (itr + 1) % 1000 == 0:
-                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_all_{itr}.torch")
+                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_all_{itr + 1}_full.torch")
                 print("Model saved at iteration:", itr + 1)
 
             # Accuracy (IOU) Calculation
             if itr == 0:
                 mean_iou = 0
             mean_iou = mean_iou * 0.99 + 0.01 * np.mean(iou.cpu().detach().numpy())
-            print("Step:", itr, "Accuracy (IOU):", mean_iou)
+            print(f"Training IOU at iteration {itr + 1}: {mean_iou}")
+            # Save training loss for this epoch
+            train_loss_file.write(f"{itr + 1},{mean_iou}\n")
+            train_loss_file.flush()
+        # - Evaluation Step
+        # Evaluation step on validation data after each iteration
+
+        with torch.no_grad():  # Disable gradient calculation for inference
+            img, mask, input_points, input_boxes, input_labels = read_batch(valid_data)
+
+            predictor.set_image(img)  # Set image in the predictor (Image Encoder)
+
+            # Prompt Encoder + Mask Decoder
+            masks, scores, logits = predictor.predict(
+                point_coords=input_points,
+                point_labels=input_labels,
+                box=input_boxes,
+                multimask_output=False
+            )
+
+            prd_mask = torch.sigmoid(torch.tensor(masks[:, 0], dtype=torch.float32))
+            gt_mask = torch.tensor(mask.astype(np.float32))[:, :, :, 0]
+
+            # Calculate IOU for validation data
+            inter = (gt_mask * (prd_mask > 0.5)).sum(1).sum(1)
+            iou_val = inter / (gt_mask.sum(1).sum(1) + (prd_mask > 0.5).sum(1).sum(1) - inter)
+
+            avg_iou = iou_val.mean().cpu().numpy()
+            print(f"Validation IOU at iteration {itr}: {avg_iou}")
+
+            # Save validation loss for this epoch
+            val_loss_file.write(f"{itr + 1},{avg_iou}\n")
+            val_loss_file.flush()
+    # Close the log files
+    train_loss_file.close()
+    val_loss_file.close()
 
 # - Main function to run the script
 def main():
@@ -178,7 +244,7 @@ def main():
     scaler = torch.amp.GradScaler()
 
     # Start training
-    train_model(predictor, train_data, itrs, optimizer, scaler)
+    train_model(predictor, train_data, valid_data, itrs, optimizer, scaler)
 
 if __name__ == "__main__":
     main()
