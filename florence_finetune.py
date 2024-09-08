@@ -22,13 +22,17 @@ from torch.amp import autocast
 data_dir = Path("./snemi/")
 raw_image_dir = data_dir / 'image_pngs'
 seg_image_dir = data_dir / 'seg_pngs'
+raw_image_slice_dir = data_dir / 'image_slice_pngs'
+seg_image_slice_dir = data_dir / 'seg_slice_pngs'
+os.makedirs(raw_image_slice_dir, exist_ok=True)
+os.makedirs(seg_image_slice_dir, exist_ok=True)
 
 # Global Constants
 CHECKPOINT = "microsoft/Florence-2-large-ft"
 REVISION = 'refs/pr/19'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
 
-BATCH_SIZE = 6
+BATCH_SIZE = 7
 NUM_WORKERS = 0
 label_num = 170  # Limit number of labels to 170
 EPOCHS = 10000
@@ -53,6 +57,55 @@ for ff, name in enumerate(os.listdir(raw_image_dir)):
 # Split dataset into training and validation sets
 valid_data = data[80:]  # 20% validation set
 data = data[:80]  # 80% training set
+
+
+# Slice Image and Masks for sequence length limit
+# - slice image and segmentation for florence sequence length limit
+def create_slices(image_path, slice_image_dir):
+    img = Image.open(image_path)
+     # Get image dimensions
+    width, height = img.size
+    
+    # Calculate the midpoint
+    mid_x, mid_y = width // 2, height // 2
+    
+    # Define the four slices (left, upper, right, lower)
+    slices = {
+        'top_left': (0, 0, mid_x, mid_y),
+        'top_right': (mid_x, 0, width, mid_y),
+        'bottom_left': (0, mid_y, mid_x, height),
+        'bottom_right': (mid_x, mid_y, width, height)
+    }
+    
+    # Loop through the slices, crop, and save them
+    all_slices = []
+    for key, coords in slices.items():
+        slice_filename = f"{image_path.stem}_{coords[0]}_{coords[1]}_{coords[2]}_{coords[3]}.png"
+        if not os.path.exists(raw_image_slice_dir / slice_filename):
+            slice_img = img.crop(coords)
+            # Format the name: base name + coordinates
+            slice_img.save( raw_image_slice_dir / slice_filename)
+
+        all_slices.append( raw_image_slice_dir / slice_filename)
+
+    return all_slices
+
+def slice_all_image_seg(data, raw_image_slice_dir, seg_image_slice_dir):
+    new_data = []
+    for element in data:
+        image_path = element['image']
+        seg_path = element['annotation']
+        image_lst = create_slices(image_path, raw_image_dir)
+        seg_lst = create_slices(seg_path, seg_image_slice_dir)
+
+        for i in range(len(image_lst)):
+            new_data.append({'image': image_lst[i], 'annotation': seg_lst[i]})
+        
+    return new_data
+
+data = slice_all_image_seg(data, raw_image_slice_dir, seg_image_slice_dir)
+valid_data = slice_all_image_seg(valid_data, raw_image_slice_dir, seg_image_slice_dir)
+
 
 # Convert segmentation masks into bounding boxes (object detection task)
 def convert_mask2box(mask: np.ndarray):
