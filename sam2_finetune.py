@@ -78,6 +78,33 @@ def set_training_mode(predictor):
     predictor.model.sam_prompt_encoder.train(True)
     predictor.model.image_encoder.train(True)
 
+def resize_masks_opencv(mask, output_size=(256, 256)):
+    """
+    Reshapes the input NumPy array by selecting the first of the 3 redundant channels,
+    then resizes each mask to the given output size using nearest-neighbor interpolation.
+
+    Args:
+    - mask (np.ndarray): Array of shape (223, 1024, 1024, 3).
+    - output_size (tuple): Desired output size (H, W) for the mask. Default is (256, 256).
+
+    Returns:
+    - resized_masks: Resized masks of shape (223, 1, 256, 256).
+    """
+    # Select the first channel (shape becomes (223, 1024, 1024))
+    masks_single_channel = mask[..., 0]
+    
+    # Reshape to (223, 1, 1024, 1024) to add the single channel back using np.expand_dims
+    reshaped_masks = np.expand_dims(masks_single_channel, axis=1)
+
+    # Initialize the array to store resized masks (223, 1, 256, 256)
+    resized_masks = np.zeros((reshaped_masks.shape[0], 1, output_size[0], output_size[1]), dtype=reshaped_masks.dtype)
+    
+    # Loop over each mask and resize using cv2.resize with nearest-neighbor interpolation
+    for i in range(reshaped_masks.shape[0]):
+        resized_masks[i, 0, :, :] = cv2.resize(reshaped_masks[i, 0, :, :], output_size, interpolation=cv2.INTER_NEAREST)
+    
+    return resized_masks
+
 # - Training Loop
 def train_model(predictor, data, itrs, optimizer, scaler):
     for itr in range(itrs):
@@ -87,9 +114,11 @@ def train_model(predictor, data, itrs, optimizer, scaler):
                 continue
             predictor.set_image(image)
 
+            reshaped_masks = resize_masks_opencv(mask)
+
             # - prompt encoding
-            mask_input, unnorm_coords, labels, unnorm_box = predictor._prep_prompts(input_point, input_label, box=input_boxes, mask_logits=mask, normalize_coords=True)
-            sparse_embeddings, dense_embeddings = predictor.model.sam_prompt_encoder(points=(unnorm_coords, labels), boxes=unnorm_box, masks=None)
+            mask_input, unnorm_coords, labels, unnorm_box = predictor._prep_prompts(input_point, input_label, box=input_boxes, mask_logits=reshaped_masks, normalize_coords=True)
+            sparse_embeddings, dense_embeddings = predictor.model.sam_prompt_encoder(points=(unnorm_coords, labels), boxes=unnorm_box, masks=mask_input)
 
             # - mask decoder
             batched_mode = unnorm_coords.shape[0] > 1
