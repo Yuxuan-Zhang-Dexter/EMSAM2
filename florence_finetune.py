@@ -18,27 +18,32 @@ from tqdm import tqdm
 
 from torch.amp import autocast
 
+import albumentations as A
+
 # Paths for image data
 data_dir = Path("./snemi/")
 raw_image_dir = data_dir / 'image_pngs'
 seg_image_dir = data_dir / 'seg_pngs'
 raw_image_slice_dir = data_dir / 'image_slice_pngs'
 seg_image_slice_dir = data_dir / 'seg_slice_pngs'
+log_dir="./logs"
 os.makedirs(raw_image_slice_dir, exist_ok=True)
 os.makedirs(seg_image_slice_dir, exist_ok=True)
+os.makedirs(log_dir, exist_ok=True)
 
 # Global Constants
 CHECKPOINT = "microsoft/Florence-2-large-ft"
 REVISION = 'refs/pr/19'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
 
-BATCH_SIZE = 7
+BATCH_SIZE = 6
 NUM_WORKERS = 0
 label_num = 170  # Limit number of labels to 170
 EPOCHS = 10000
 LR = 5e-6
 rank = 8
 alpha = 8
+weight_decay=1e-2
 
 # Load the model and processor
 model = AutoModelForCausalLM.from_pretrained(CHECKPOINT, trust_remote_code=True, revision=REVISION)
@@ -80,13 +85,11 @@ def create_slices(image_path, slice_image_dir):
     # Loop through the slices, crop, and save them
     all_slices = []
     for key, coords in slices.items():
+        slice_img = img.crop(coords)
+        # Format the name: base name + coordinates
         slice_filename = f"{image_path.stem}_{coords[0]}_{coords[1]}_{coords[2]}_{coords[3]}.png"
-        if not os.path.exists(raw_image_slice_dir / slice_filename):
-            slice_img = img.crop(coords)
-            # Format the name: base name + coordinates
-            slice_img.save( raw_image_slice_dir / slice_filename)
-
-        all_slices.append( raw_image_slice_dir / slice_filename)
+        slice_img.save( slice_image_dir / slice_filename)
+        all_slices.append( slice_image_dir / slice_filename)
 
     return all_slices
 
@@ -95,7 +98,7 @@ def slice_all_image_seg(data, raw_image_slice_dir, seg_image_slice_dir):
     for element in data:
         image_path = element['image']
         seg_path = element['annotation']
-        image_lst = create_slices(image_path, raw_image_dir)
+        image_lst = create_slices(image_path, raw_image_slice_dir)
         seg_lst = create_slices(seg_path, seg_image_slice_dir)
 
         for i in range(len(image_lst)):
@@ -131,21 +134,73 @@ def normalize_loc(prefix: str, instance_type: str, image_path: str, mask: np.nda
         count += 1
     return {"image": image_path, "prefix": prefix, "suffix": suffix}
 
-# Process dataset by converting masks to bounding boxes and normalizing them
-def prepare_dataset(data, instance_type, prefix):
+# - Apply Albumentations to image and bounding boxes
+# Albumentations transformation pipeline
+transform = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.ShiftScaleRotate(scale_limit=0.1, rotate_limit=45, shift_limit=0.1, p=0.5),
+    A.RandomBrightnessContrast(p=0.5)
+], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
+
+# - Check Invalid Bounding Boxes
+def validate_boxes(boxes):
+    """Validate and filter out invalid bounding boxes."""
+    valid_boxes = []
+    for box in boxes:
+        x_min, y_min, x_max, y_max = box[:4]
+        if x_max > x_min and y_max > y_min:
+            valid_boxes.append(box)
+    return valid_boxes
+
+
+
+def apply_augmentation(image, input_boxes):
+
+    class_labels = [0] * len(input_boxes)  # All neurons are of the same class (update if multi-class)
+    augmented = transform(image=image, bboxes=input_boxes, class_labels=class_labels)
+    
+    return augmented['image'], augmented['bboxes']
+
+def save_augmented_image(image, original_image_path, augmented_image_dir):
+    # Convert image array back to image format
+    augmented_image = Image.fromarray(image)
+    
+    # Generate a new file name based on the original
+    new_image_filename = f"{original_image_path.stem}_augmented.png"
+    new_image_path = augmented_image_dir / new_image_filename
+    
+    # Save the new image
+    augmented_image.save(new_image_path)
+    
+    return new_image_path
+
+## - Prepare all training dataset and validation dataset
+def prepare_dataset(data, instance_type, prefix, augmentation = False):
     dataset = []
     for element in data:
         image_path = element['image']
         seg_path = element['annotation']
-        mask = np.array(Image.open(seg_path))  # Load segmentation mask
-        input_boxes = convert_mask2box(mask)  # Convert mask to bounding boxes
+        mask = np.array(Image.open(seg_path))
+        input_boxes = convert_mask2box(mask)
+        # Validate bounding boxes before applying augmentation
+        input_boxes = validate_boxes(input_boxes)
+        # - Start data augmentation
+        if augmentation == True:
+            temp_image = np.array(Image.open(image_path))
+            augmented_image, augmented_boxes = apply_augmentation(temp_image, input_boxes)
+            new_image_path = save_augmented_image(augmented_image, image_path, image_path.parent)
+            new_curated_data = normalize_loc(prefix, instance_type, new_image_path, mask, augmented_boxes)
+            dataset.append(new_curated_data)
+
         curated_data = normalize_loc(prefix, instance_type, image_path, mask, input_boxes)
         dataset.append(curated_data)
+    print(f"Remove Invalid Bounding Boxes xmin >= xlarge or ymin >= ylarge")
     return dataset
 
-# Prepare training and validation datasets
-train_dataset = prepare_dataset(data, 'neuron', "<OD>")
-val_dataset = prepare_dataset(valid_data, 'neuron', "<OD>")
+train_dataset = prepare_dataset(data, 'neuron', "<OD>", True)
+val_dataset = prepare_dataset(valid_data, 'neuron', "<OD>", True)
 
 # Dataset class for detection tasks
 class DetectionDataset(Dataset):
@@ -202,15 +257,23 @@ if torch.cuda.device_count() > 1:
     peft_model = torch.nn.DataParallel(peft_model)
 
 # Training loop for fine-tuning the model
-def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
-    optimizer = AdamW(model.parameters(), lr=lr)
+def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6, weight_decay=1e-2):
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     num_training_steps = epochs * len(train_loader)
+    # Total number of training steps
+    num_training_steps = epochs * len(train_loader)
+    
+    # Adjust the scheduler to be more gradual (object detection tasks benefit from slower learning rate decay)
     lr_scheduler = get_scheduler(
-        name="linear",
+        name="cosine",
         optimizer=optimizer,
-        num_warmup_steps=0,
+        num_warmup_steps=int(0.1 * num_training_steps),  # 10% warmup steps
         num_training_steps=num_training_steps,
     )
+
+    # Open log files for saving training and validation loss
+    train_loss_file = open(os.path.join(log_dir, "flo_train_loss.txt"), "w")
+    val_loss_file = open(os.path.join(log_dir, "flo_val_loss.txt"), "w")
 
     for epoch in range(epochs):
         model.train()
@@ -233,6 +296,10 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
         avg_train_loss = train_loss / len(train_loader)
         print(f"Average Training Loss: {avg_train_loss}")
 
+        # Save training loss for this epoch
+        train_loss_file.write(f"{epoch + 1},{avg_train_loss}\n")
+        train_loss_file.flush()
+
         # Validation phase (no gradients needed)
         model.eval()
         val_loss = 0
@@ -248,6 +315,10 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
 
             avg_val_loss = val_loss / len(val_loader)
             print(f"Average Validation Loss: {avg_val_loss}")
+
+            # Save validation loss for this epoch
+            val_loss_file.write(f"{epoch + 1},{avg_val_loss}\n")
+            val_loss_file.flush()
         
         if (epoch + 1) < 1000:
             if (epoch + 1) % 100 == 0:
@@ -262,6 +333,9 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
             os.makedirs(output_dir, exist_ok=True)
             model.module.save_pretrained(output_dir)  # Save model
             processor.save_pretrained(output_dir)  # Save processor
+    # Close the log files
+    train_loss_file.close()
+    val_loss_file.close()
 
 # Start the training process
-train_model(train_loader, val_loader, peft_model, processor, epochs=EPOCHS, lr=LR)
+train_model(train_loader, val_loader, peft_model, processor, epochs=EPOCHS, lr=LR, weight_decay=weight_decay)
