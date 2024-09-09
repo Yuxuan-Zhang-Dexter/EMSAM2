@@ -22,6 +22,7 @@ log_dir="./logs"
 sam2_checkpoint = "./sam2_hiera_large.pt"
 model_cfg = "./sam2_hiera_l.yaml"
 itrs = 10000
+val_num = 10
 
 # Create checkpoint directory if it doesn't exist
 checkpoint_dir = './checkpoints/all'
@@ -185,7 +186,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
 
             # Save model every 1000 iterations
             if (itr + 1) % 1000 == 0:
-                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_all_{itr + 1}_full.torch")
+                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_full_{itr + 1}.torch")
                 print("Model saved at iteration:", itr + 1)
 
             # Accuracy (IOU) Calculation
@@ -199,32 +200,36 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
         # - Evaluation Step
         # Evaluation step on validation data after each iteration
 
-        with torch.no_grad():  # Disable gradient calculation for inference
-            img, mask, input_points, input_boxes, input_labels = read_batch(valid_data)
+        total_iou = 0
+        for i in range(val_num):
+            with torch.no_grad():  # Disable gradient calculation for inference
+                img, mask, input_points, input_boxes, input_labels = read_batch(valid_data)
 
-            predictor.set_image(img)  # Set image in the predictor (Image Encoder)
+                predictor.set_image(img)  # Set image in the predictor (Image Encoder)
 
-            # Prompt Encoder + Mask Decoder
-            masks, scores, logits = predictor.predict(
-                point_coords=input_points,
-                point_labels=input_labels,
-                box=input_boxes,
-                multimask_output=False
-            )
+                # Prompt Encoder + Mask Decoder
+                masks, scores, logits = predictor.predict(
+                    point_coords=input_points,
+                    point_labels=input_labels,
+                    box=input_boxes,
+                    multimask_output=False
+                )
 
-            prd_mask = torch.sigmoid(torch.tensor(masks[:, 0], dtype=torch.float32))
-            gt_mask = torch.tensor(mask.astype(np.float32))[:, :, :, 0]
+                prd_mask = torch.sigmoid(torch.tensor(masks[:, 0], dtype=torch.float32))
+                gt_mask = torch.tensor(mask.astype(np.float32))[:, :, :, 0]
 
-            # Calculate IOU for validation data
-            inter = (gt_mask * (prd_mask > 0.5)).sum(1).sum(1)
-            iou_val = inter / (gt_mask.sum(1).sum(1) + (prd_mask > 0.5).sum(1).sum(1) - inter)
+                # Calculate IOU for validation data
+                inter = (gt_mask * (prd_mask > 0.5)).sum(1).sum(1)
+                iou_val = inter / (gt_mask.sum(1).sum(1) + (prd_mask > 0.5).sum(1).sum(1) - inter)
 
-            avg_iou = iou_val.mean().cpu().numpy()
-            print(f"Validation IOU at iteration {itr}: {avg_iou}")
+                total_iou += iou_val.mean().cpu().numpy()
+    
+        avg_iou = total_iou // val_num
+        print(f"Validation IOU at iteration {itr}: {avg_iou}")
 
-            # Save validation loss for this epoch
-            val_loss_file.write(f"{itr + 1},{avg_iou}\n")
-            val_loss_file.flush()
+        # Save validation loss for this epoch
+        val_loss_file.write(f"{itr + 1},{avg_iou}\n")
+        val_loss_file.flush()
     # Close the log files
     train_loss_file.close()
     val_loss_file.close()
