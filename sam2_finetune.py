@@ -224,7 +224,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
 
                 total_iou += iou_val.mean().cpu().numpy()
     
-        avg_iou = total_iou // val_num
+        avg_iou = total_iou / val_num
         print(f"Validation IOU at iteration {itr}: {avg_iou}")
 
         # Save validation loss for this epoch

@@ -263,13 +263,11 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6, 
     # Total number of training steps
     num_training_steps = epochs * len(train_loader)
     
-    # Adjust the scheduler to be more gradual (object detection tasks benefit from slower learning rate decay)
     lr_scheduler = get_scheduler(
-        name="cosine",
+        name="linear",
         optimizer=optimizer,
         num_warmup_steps=int(0.1 * num_training_steps),  # 10% warmup steps
-        num_training_steps=num_training_steps,
-    )
+        num_training_steps=num_training_steps,)
 
     # Open log files for saving training and validation loss
     train_loss_file = open(os.path.join(log_dir, "flo_train_loss.txt"), "w")
