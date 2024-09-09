@@ -16,8 +16,8 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 data_dir = Path("./snemi/")
 raw_image_dir = data_dir / 'image_pngs'
 seg_image_dir = data_dir / 'seg_pngs'
-train_loss_filename = "sam_train_loss_full.txt"
-val_loss_filename = "sam_val_loss_full.txt"
+train_loss_filename = "sam_train_loss_slice.txt"
+val_loss_filename = "sam_val_loss_slice.txt"
 raw_image_slice_dir = data_dir / 'image_slice_pngs'
 seg_image_slice_dir = data_dir / 'seg_slice_pngs'
 log_dir="./logs"
@@ -229,7 +229,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
 
             # Save model every 1000 iterations
             if (itr + 1) % 1000 == 0:
-                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_full_{itr + 1}.torch")
+                torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_slice_{itr + 1}.torch")
                 print("Model saved at iteration:", itr + 1)
 
             # Accuracy (IOU) Calculation
