@@ -85,34 +85,46 @@ def slice_all_image_seg(data, raw_image_slice_dir, seg_image_slice_dir):
 
 # Function to read and process a batch of data
 def read_batch(data):
-    ent = data[np.random.randint(len(data))]  # choose random entry
-    Img = cv2.imread(str(ent["image"]))  # read image
-    ann_map_grayscale = np.array(Image.open(ent['annotation']))
-    ann_map = np.stack((ann_map_grayscale, ) * 3, axis=-1)
-   
-    # resize image
-    r = np.min([1024 / Img.shape[1], 1024 / Img.shape[0]])  # scaling factor
-    Img = cv2.resize(Img, (int(Img.shape[1] * r), int(Img.shape[0] * r)))
-    ann_map = cv2.resize(ann_map, (int(ann_map.shape[1] * r), int(ann_map.shape[0] * r)), interpolation=cv2.INTER_NEAREST)
+     #  select image
+     ent  = data[np.random.randint(len(data))] # choose random entry
+     Img = cv2.imread(str(ent["image"])) # read image
+     ann_map_grayscale = np.array(Image.open(ent['annotation']))
+     ann_map = np.stack((ann_map_grayscale, ) * 3, axis = -1)
+     
+     if Img.shape[0] > 1024 or Img.shape[1] > 1024:
+          # Calculate scaling factor
+          r = np.min([1024 / Img.shape[1], 1024 / Img.shape[0]])  # Scaling factor to fit within 1024x1024
+          # Resize the image
+          Img = cv2.resize(Img, (int(Img.shape[1] * r), int(Img.shape[0] * r)))
+          # Resize the annotation map (with nearest neighbor interpolation)
+          ann_map = cv2.resize(ann_map, (int(ann_map.shape[1] * r), int(ann_map.shape[0] * r)), interpolation=cv2.INTER_NEAREST)
 
-    # get bounding boxes from the mask
-    inds = np.unique(ann_map_grayscale)[1:]  # load all indices
-    masks = [(ann_map_grayscale == ind) for ind in inds]
-    masks_tensor = torch.from_numpy(np.array(masks))
-    boxes = masks_to_boxes(masks_tensor)
-    input_boxes = boxes.numpy()
+     # - get bounding box
+     inds = np.unique(ann_map_grayscale)[1:] # load all indices
 
-    # Get binary masks and points
-    points = []
-    masks = []
-    for ind in inds:
-        mask = (ann_map == ind).astype(np.uint8)
-        masks.append(mask)
-        coords = np.argwhere(mask > 0)  # get all coordinates in mask
-        yx = np.array(coords[np.random.randint(len(coords))])  # choose random point
-        points.append([[yx[1], yx[0]]])
-   
-    return Img, np.array(masks), np.array(points), input_boxes, np.ones([len(masks), 1])
+     masks = [] 
+     for ind in inds:
+        masks.append(ann_map_grayscale == ind)
+     masks = np.array(masks)
+     masks_tensor = torch.from_numpy(masks)
+
+     boxes = masks_to_boxes(masks_tensor)
+     input_boxes = boxes.numpy()
+
+
+
+     # Get binary masks and points
+     mat_map = ann_map
+     inds = np.unique(mat_map)[1:] # load all indices
+     points= []
+     masks = [] 
+     for ind in inds:
+          mask=(mat_map == ind).astype(np.uint8) # make binary mask
+          masks.append(mask)
+          coords = np.argwhere(mask > 0) # get all coordinates in mask
+          yx = np.array(coords[np.random.randint(len(coords))]) # choose random point/coordinate
+          points.append([[yx[1], yx[0]]])
+     return Img,np.array(masks),np.array(points), input_boxes, np.ones([len(masks),1])
 
 # - Build SAM2 Model
 def build_sam2_model():
