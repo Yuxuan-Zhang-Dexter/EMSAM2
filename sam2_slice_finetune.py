@@ -246,7 +246,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
             scaler.update()  # Mix precision
 
             # Save model every 1000 iterations
-            if (itr + 1) % 500 == 0:
+            if (itr + 1) % 1000 == 0:
                 torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_slice_{itr + 1}.torch")
                 print("Model saved at iteration:", itr + 1)
 

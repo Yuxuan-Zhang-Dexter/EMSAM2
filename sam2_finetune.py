@@ -149,7 +149,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
             reshaped_masks = resize_masks_opencv(mask)
 
             # - prompt encoding
-            mask_input, unnorm_coords, labels, unnorm_box = predictor._prep_prompts(input_point, input_label, box=input_boxes, mask_logits=reshaped_masks, normalize_coords=True)
+            mask_input, unnorm_coords, labels, unnorm_box = predictor._prep_prompts(input_point, input_label, box=input_boxes, mask_logits=None, normalize_coords=True)
             sparse_embeddings, dense_embeddings = predictor.model.sam_prompt_encoder(points=(unnorm_coords, labels), boxes=unnorm_box, masks=mask_input)
 
             # - mask decoder
@@ -185,7 +185,7 @@ def train_model(predictor, data, valid_data, itrs, optimizer, scaler):
             scaler.update()  # Mix precision
 
             # Save model every 1000 iterations
-            if (itr + 1) % 1000 == 0:
+            if (itr + 1) % 500 == 0:
                 torch.save(predictor.model.state_dict(), f"./checkpoints/all/large_model_full_{itr + 1}.torch")
                 print("Model saved at iteration:", itr + 1)
 
