@@ -452,7 +452,7 @@ def main():
     for i in range(num_file):
         image_sample_slicer = ImageSlicer(test_image_path_lst[i], (512, 512), 0.75, test_image_slice_dir)
         slice_lst = image_sample_slicer.slice_image()
-        full_binary_mask = image_sample_slicer.run_segmentation(slice_lst, (1024, 1024), num_corr=10, num_steps=5)
+        full_binary_mask = image_sample_slicer.run_segmentation(slice_lst, (1024, 1024), num_corr=num_corr, num_steps=num_steps)
         full_binary_image = Image.fromarray(full_binary_mask)
         img_id = re.findall(r'\d+', image_sample_slicer.image_path.stem)
 
