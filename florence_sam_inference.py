@@ -83,12 +83,12 @@ model_cfg = "./sam2_hiera_l.yaml"
 finetuned_parameter_path = "./checkpoints/all/large_model_slice_7000.torch"
 
 # Overlap ratios
-overlapp_ratio = 0.15  # For SAM2
-image_overlapp_ratio = 0.25  # For image slicing
+overlapp_ratio = 0.1  # For SAM2
+image_overlapp_ratio = 0.53  # For image slicing
 
 # Inference parameters
-num_corr = 10
-num_steps = 10
+num_corr = 30
+num_steps = 15
 num_file = 1
 
 # Ensure necessary directories exist
@@ -236,6 +236,9 @@ def predict_seg(
         )
 
     # Sort masks based on their scores for high-quality segmentation
+    if len(masks.shape) == 3:
+        masks = masks.reshape((1, masks.shape[0], masks.shape[1], masks.shape[2]))
+        scores = scores.reshape((1, len(scores)))
     sorted_masks = masks[np.argsort(scores[:, 0])[::-1], :, :, :].astype(bool)
     seg_map = np.zeros_like(sorted_masks[0, 0, ...], dtype=np.uint8)
     occupancy_mask = np.zeros_like(sorted_masks[0, 0, ...], dtype=bool)
@@ -281,63 +284,53 @@ def post_predict_seg(
     input_boxes: np.ndarray = None,
     multimask_output: bool = False,
 ) -> np.ndarray:
-    """
-    Perform further segmentation correction using SAM2 model.
     
-    Args:
-        img (np.ndarray): Input image as a numpy array.
-        occupancy_mask (np.ndarray): Existing occupancy mask.
-        seg_map (np.ndarray): Existing segmentation map.
-        input_points (np.ndarray): Coordinates of input points for segmentation (optional).
-        point_labels (np.ndarray): Labels for the input points (optional).
-        input_boxes (np.ndarray): Input bounding boxes for segmentation (optional).
-        multimask_output (bool): Flag to enable multi-mask output.
-    
-    Returns:
-        occupancy_mask (np.ndarray): Updated occupancy mask.
-        seg_map (np.ndarray): Updated segmentation map.
-        rgb_image (np.ndarray): Updated segmentation map projected to an RGB image.
-    """
+    if input_points.shape[0] == 0:
+        rgb_image = np.zeros((seg_map.shape[0], seg_map.shape[1], 3), dtype=np.uint8)
+        for id_class in range(1, seg_map.max() + 1):
+            rgb_image[seg_map == id_class] = [np.random.randint(255), np.random.randint(255), np.random.randint(255)]
+
+        return occupancy_mask, seg_map, rgb_image
+
     torch.autocast(device_type='cpu', dtype=torch.bfloat16).__enter__()
-
-    with torch.no_grad():
-        predictor.set_image(img)
-        masks, scores, logits = predictor.predict(
-            point_coords=input_points,
-            point_labels=point_labels,
-            box=input_boxes,
-            multimask_output=multimask_output
-        )
-
-    # Handle multi-mask output
+    with torch.no_grad(): # prevent the net from caclulate gradient (more efficient inference)
+            predictor.set_image(img) # image encoder
+            masks, scores, logits = predictor.predict(  # prompt encoder + mask decoder
+                point_coords=input_points,
+                point_labels=point_labels,
+                box = input_boxes,
+                multimask_output=multimask_output)
+            
+    # - sort masks based on their scores (high-quality segmentation)
     if len(masks.shape) == 3:
         masks = masks.reshape((1, masks.shape[0], masks.shape[1], masks.shape[2]))
         scores = scores.reshape((1, len(scores)))
-        
-    sorted_masks = masks[np.argsort(scores[:, 0])[::-1], :, :, :].astype(bool)
+    shorted_masks = masks[np.argsort(scores[:,0])[::-1], :, :, :].astype(bool)
+    seg_map = seg_map
+    occupancy_mask = occupancy_mask
     max_id = np.max(seg_map) + 1
 
-    # Add new masks to the existing segmentation map
-    for i in range(sorted_masks.shape[0]):
+    # - add the masks one by one from high to low score
+    for i in range(shorted_masks.shape[0]):
         if multimask_output:
-            mask_lst = sorted_masks[i]
+            mask_lst = shorted_masks[i]
             score_lst = scores[i]
             score_rank = np.argsort(score_lst)[::-1]
             sorted_mask_lst = mask_lst[score_rank]
             for mask in sorted_mask_lst:
-                if (mask * occupancy_mask).sum() / mask.sum() <= overlapp_ratio:
-                    mask[occupancy_mask] = 0
-                    seg_map[mask] = max_id + i
-                    occupancy_mask[mask] = 1
+                if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                    mask[occupancy_mask]=0
+                    seg_map[mask]=max_id + i
+                    occupancy_mask[mask]=1
                     break
         else:
-            mask = sorted_masks[i, 0, ...]
-            if (mask * occupancy_mask).sum() / mask.sum() <= overlapp_ratio:
-                mask[occupancy_mask] = 0
-                seg_map[mask] = max_id + i
-                occupancy_mask[mask] = 1
-
-    # Project segmentation map to RGB
+             mask = shorted_masks[i, 0, ...]
+             if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                mask[occupancy_mask]=0
+                seg_map[mask]=max_id + i
+                occupancy_mask[mask]=1
+        
+    # - project back to RGB
     rgb_image = np.zeros((seg_map.shape[0], seg_map.shape[1], 3), dtype=np.uint8)
     for id_class in range(1, seg_map.max() + 1):
         rgb_image[seg_map == id_class] = [np.random.randint(255), np.random.randint(255), np.random.randint(255)]
@@ -430,7 +423,7 @@ def flo_sam_infer(image_path: str, num_corr: int = 5, num_steps: int = 10) -> np
 
     # Step 2: Read the image and perform SAM2 segmentation using the bounding boxes
     img = cv2.imread(str(image_path))
-    occupancy_mask, seg_map, rgb_image = predict_seg(img, None, None, input_boxes=bboxes)
+    occupancy_mask, seg_map, rgb_image = predict_seg(img, None, None, input_boxes=bboxes, multimask_output=True)
 
     # Step 3: Iteratively apply corrections based on sparse coordinates
     for i in tqdm(range(num_corr), desc='Continuous Correction', leave=False):
@@ -577,11 +570,11 @@ class ImageSlicer:
             combined_mask (np.ndarray): Combined binary mask from all slices.
         """
         binary_masks = []
-        for image_path in tqdm(slice_paths, desc="Running Segmentation"):
+        for image_path in tqdm(slice_paths, desc="Running Segmentation", leave=False):
             rgb_seg = flo_sam_infer(image_path, num_corr=num_corr, num_steps=num_steps)
             coords = image_path.stem.split("_")[1:]
             coords = [int(x) for x in coords]
-
+            binary_masks = list(binary_masks)
             binary_masks, mask_boxes = self.convert_binary_mask(binary_masks, rgb_seg, coords, total_shape)
 
         combined_mask = np.sum(binary_masks, axis=0) > 0  # Threshold combined masks
@@ -604,8 +597,8 @@ def main():
     """
     all_files = np.sort(os.listdir(test_image_dir))
     test_image_path_lst = np.array([test_image_dir / test_image_path for test_image_path in all_files])
-
-    for i in range(num_file):
+    
+    for i in tqdm(range(len(test_image_path_lst)), desc="Predict All Test Images"):
         # Create an ImageSlicer instance for each test image
         image_sample_slicer = ImageSlicer(test_image_path_lst[i], (512, 512), image_overlapp_ratio, test_image_slice_dir)
 
