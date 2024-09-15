@@ -69,7 +69,7 @@ CHECKPOINT = "microsoft/Florence-2-base-ft"
 REVISION = 'refs/pr/6'
 
 # Device configuration (use GPU if available)
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Dataset configuration
 label_num = 170
@@ -84,10 +84,10 @@ finetuned_parameter_path = "./checkpoints/all/large_model_slice_7000.torch"
 
 # Overlap ratios
 overlapp_ratio = 0.1  # For SAM2
-image_overlapp_ratio = 0.53  # For image slicing
+image_overlapp_ratio = 0.5  # For image slicing
 
 # Inference parameters
-num_corr = 30
+num_corr = 50
 num_steps = 15
 num_file = 1
 
@@ -109,6 +109,8 @@ predictor = SAM2ImagePredictor(sam2_model)
 
 # Load finetuned parameters into the SAM2 predictor
 predictor.model.load_state_dict(torch.load(finetuned_parameter_path, map_location=DEVICE))
+
+
 
 
 # --------------------------------------------------------------
