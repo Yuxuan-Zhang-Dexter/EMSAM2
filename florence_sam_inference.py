@@ -80,7 +80,7 @@ NUM_WORKERS = 0
 checkpoint_dir = './model_checkpoints/large_model/epoch_700'
 sam2_checkpoint = "./sam2_hiera_large.pt"
 model_cfg = "./sam2_hiera_l.yaml"
-finetuned_parameter_path = "./checkpoints/all/large_model_slice_7000.torch"
+finetuned_parameter_path = "./checkpoints/all/large_model_full_1000.torch"
 
 # Overlap ratios
 overlapp_ratio = 0.1  # For SAM2
@@ -337,6 +337,170 @@ def post_predict_seg(
     for id_class in range(1, seg_map.max() + 1):
         rgb_image[seg_map == id_class] = [np.random.randint(255), np.random.randint(255), np.random.randint(255)]
 
+    return occupancy_mask, seg_map, rgb_image
+# - Using Morphology Closing Method to post process mask
+def is_fully_connected(mask, kernel_size = 30, max_iterations=1):
+    for i in range(max_iterations):
+        kernel = np.ones((kernel_size, kernel_size))
+        kernel_size += 1
+        # Apply morphological closing
+        new_mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        # num_labels, _ = cv2.connectedComponents(new_mask)
+        # if num_labels == 2:
+        #     return new_mask
+
+    
+    # # Create a subplot with two images: the original and the new mask
+    # plt.figure(figsize=(10, 5))
+    
+    # # Plot the original mask
+    # plt.subplot(1, 2, 1)  # 1 row, 2 columns, first plot
+    # plt.imshow(mask, cmap='gray')
+    # plt.title("Original Mask")
+    # plt.axis('off')  # Hide axis ticks
+    
+    # # Plot the new mask
+    # plt.subplot(1, 2, 2)  # 1 row, 2 columns, second plot
+    # plt.imshow(new_mask, cmap='gray')
+    # plt.title("New Mask After Morphology")
+    # plt.axis('off')  # Hide axis ticks
+    
+    # # Show the plot
+    # plt.show()
+
+    # print(f"Mask is not connected after iters {max_iterations}")
+    
+    return new_mask
+
+# - iterative filter prediction
+def iter_predict_seg(
+    img: np.ndarray,
+    occupancy_mask = None,
+    seg_map = None,
+    input_points: np.ndarray = None,
+    point_labels: np.ndarray = None,
+    input_boxes: np.ndarray = None,
+    multimask_output: bool = False,
+    filter = True,
+    min_area: int = 50,
+    overlap_ratio = 0.2
+) -> np.ndarray:
+    torch.autocast(device_type='cpu', dtype=torch.bfloat16).__enter__()
+    with torch.no_grad(): # prevent the net from caclulate gradient (more efficient inference)
+            predictor.set_image(img) # image encoder
+            masks, scores, logits = predictor.predict(  # prompt encoder + mask decoder
+                point_coords=input_points,
+                point_labels=point_labels,
+                box = input_boxes,
+                multimask_output=multimask_output)
+            
+    # - sort masks based on their scores (high-quality segmentation)
+    shorted_masks = masks[np.argsort(scores[:,0])[::-1], :, :, :].astype(bool)
+    if seg_map is None and occupancy_mask is None:
+        seg_map = np.zeros_like(shorted_masks[0, 0, ...], dtype=np.uint16)
+        occupancy_mask = np.zeros_like(shorted_masks[0, 0, ...],dtype=bool)
+    else:
+        seg_map = seg_map
+        occupancy_mask = occupancy_mask
+    max_id = np.max(seg_map) + 1
+
+    # - add the masks one by one from high to low score
+    id_increase = 0
+    for i in range(shorted_masks.shape[0]):
+        if multimask_output:
+            mask_lst = shorted_masks[i]
+            score_lst = scores[i]
+            score_rank = np.argsort(score_lst)[::-1]
+            sorted_mask_lst = mask_lst[score_rank]
+            for mask in sorted_mask_lst:
+                if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                    if filter:
+                        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+                        if num_labels != 2:
+                            continue
+                        else:
+                            mask = is_fully_connected(mask, kernel_size=30)
+                            mask = mask.astype(bool)
+                    else:
+                        # Apply morphological closing (dilation followed by erosion)
+                        mask = is_fully_connected(mask, kernel_size=150)
+                        mask = mask.astype(bool)
+                            
+                    mask[occupancy_mask]=0
+                    seg_map[mask]=max_id + id_increase
+                    id_increase += 1
+                    occupancy_mask[mask]=1
+                    break
+        else:
+             mask = shorted_masks[i, 0, ...]
+             if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                mask[occupancy_mask]=0
+                seg_map[mask]=i+1
+                occupancy_mask[mask]=1
+        
+    # - project back to RGB
+    rgb_image = np.zeros((seg_map.shape[0], seg_map.shape[1], 3), dtype=np.uint8)
+    for id_class in range(1, seg_map.max() + 1):
+        rgb_image[seg_map == id_class] = [np.random.randint(255), np.random.randint(255), np.random.randint(255)]
+    return occupancy_mask, seg_map, rgb_image
+
+
+# - Post Predict Segmentation
+def iter_post_predict_seg(
+    img: np.ndarray,
+    occupancy_mask,
+    seg_map,
+    input_points: np.ndarray = None,
+    point_labels: np.ndarray = None,
+    input_boxes: np.ndarray = None,
+    multimask_output: bool = False,
+) -> np.ndarray:
+    torch.autocast(device_type='cpu', dtype=torch.bfloat16).__enter__()
+    with torch.no_grad(): # prevent the net from caclulate gradient (more efficient inference)
+            predictor.set_image(img) # image encoder
+            masks, scores, logits = predictor.predict(  # prompt encoder + mask decoder
+                point_coords=input_points,
+                point_labels=point_labels,
+                box = input_boxes,
+                multimask_output=multimask_output)
+            
+    # - sort masks based on their scores (high-quality segmentation)
+    if len(masks.shape) == 3:
+        masks = masks.reshape((1, masks.shape[0], masks.shape[1], masks.shape[2]))
+        scores = scores.reshape((1, len(scores)))
+    shorted_masks = masks[np.argsort(scores[:,0])[::-1], :, :, :].astype(bool)
+    seg_map = seg_map
+    occupancy_mask = occupancy_mask
+    max_id = np.max(seg_map) + 1
+
+    id_increase = 0
+    # - add the masks one by one from high to low score
+    for i in range(shorted_masks.shape[0]):
+        if multimask_output:
+            mask_lst = shorted_masks[i]
+            score_lst = scores[i]
+            score_rank = np.argsort(score_lst)[::-1]
+            sorted_mask_lst = mask_lst[score_rank]
+            for mask in sorted_mask_lst:
+                if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                    mask = is_fully_connected(mask, kernel_size=30)
+                    mask = mask.astype(bool)
+                    mask[occupancy_mask]=0
+                    seg_map[mask]=max_id + id_increase
+                    id_increase += 1
+                    occupancy_mask[mask]=1
+                    break
+        else:
+             mask = shorted_masks[i, 0, ...]
+             if (mask*occupancy_mask).sum()/mask.sum() <= overlapp_ratio:
+                mask[occupancy_mask]=0
+                seg_map[mask]=max_id + i
+                occupancy_mask[mask]=1
+        
+    # - project back to RGB
+    rgb_image = np.zeros((seg_map.shape[0], seg_map.shape[1], 3), dtype=np.uint8)
+    for id_class in range(1, seg_map.max() + 1):
+        rgb_image[seg_map == id_class] = [np.random.randint(255), np.random.randint(255), np.random.randint(255)]
     return occupancy_mask, seg_map, rgb_image
 
 # --------------------------------------------------------------
@@ -622,4 +786,66 @@ def main():
 # --------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    # main()
+    all_files = np.sort(os.listdir(test_image_dir))
+    test_image_path_lst = np.array([test_image_dir / test_image_path for test_image_path in all_files])
+    for i in tqdm(range(len(test_image_path_lst)), desc="Predict All Test Images"):
+        # - The First Stage Prediction
+        image_path= test_image_path_lst[i]
+        num_labels, bboxes, image = flo_infer_bboxes(image_path, 2048, num_steps=1)
+        bboxes = validate_boxes(bboxes)
+        img = cv2.imread(str(image_path))
+        occupancy_mask, seg_map, rgb_image = iter_predict_seg( img , input_boxes = bboxes, multimask_output = True)
+        print(f"The initial number of labels: {len(np.unique(seg_map))}")
+        pre = len(np.unique(seg_map))
+        count = 0
+        for i in tqdm(range(100)):
+            num_labels, bboxes, image = flo_infer_bboxes(image_path, 2048, num_steps=1)
+            occupancy_mask, seg_map, rgb_image = iter_predict_seg( img , occupancy_mask, seg_map, input_boxes = bboxes, multimask_output = True)
+            cur = len(np.unique(seg_map))
+            if count == 100:
+                break
+            if cur == pre:
+                count += 1
+            else:
+                pre = cur
+                count = 0
+        print(f"the final number of first_stage labels: {len(np.unique(seg_map))}")
+
+        #  - The second Stage Prediction
+        count = 0
+        pre = len(np.unique(seg_map))
+        for i in tqdm(range(10)):
+            num_labels, bboxes, image = flo_infer_bboxes(image_path, 2048, num_steps=1)
+            occupancy_mask, seg_map, rgb_image = iter_predict_seg( img , occupancy_mask, seg_map, input_boxes = bboxes, multimask_output = True, filter = False)
+            cur = len(np.unique(seg_map))
+            if count == 20:
+                break
+            if cur == pre:
+                count += 1
+            else:
+                pre = cur
+                count = 0
+        print(f"the final number of second_stage labels: {len(np.unique(seg_map))}")
+
+        temp_count = 0
+        for j in tqdm(range(8, 1, -1)):
+            for k in tqdm(range(10), leave = False):
+                erode_size = (j, j)
+                false_coordinates = np.array(select_sparse_coordinates(occupancy_mask, erode_kernel_size=erode_size, dilate_kernel_size = erode_size))
+                if false_coordinates.shape[0] == 0:
+                    continue
+                false_labels = np.ones([false_coordinates.shape[0],])
+                # reshape coordinates and prepare labels
+                false_coordinates = false_coordinates.reshape((false_coordinates.shape[0], 1, false_coordinates.shape[1]))
+                false_labels = np.ones([false_coordinates.shape[0], 1])
+                occupancy_mask, seg_map, rgb_image = iter_post_predict_seg( img, occupancy_mask, seg_map, input_points = false_coordinates, point_labels = false_labels, multimask_output=True)
+        print(f"the final number of third_stage labels: {len(np.unique(seg_map))}")
+
+        img_id = re.findall(r'\d+', image_path.stem)
+        temp_path = test_image_pred_dir / f'seg{img_id[0]}.png'
+        seg_map = ((seg_map / seg_map.max()) * 255).astype(np.uint8)
+        full_seg_image = Image.fromarray(seg_map)
+        full_seg_image.save(temp_path)
+
+
