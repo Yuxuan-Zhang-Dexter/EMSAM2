@@ -83,7 +83,7 @@ model_cfg = "./sam2_hiera_l.yaml"
 finetuned_parameter_path = "./checkpoints/all/large_model_full_1000.torch"
 
 # Overlap ratios
-overlapp_ratio = 0.1  # For SAM2
+overlapp_ratio = 0.15  # For SAM2
 image_overlapp_ratio = 0.5  # For image slicing
 
 # Inference parameters
@@ -395,6 +395,9 @@ def iter_predict_seg(
                 multimask_output=multimask_output)
             
     # - sort masks based on their scores (high-quality segmentation)
+    if len(scores.shape) != 2 and len(masks.shape) != 4:
+        return occupancy_mask, seg_map, None
+        
     shorted_masks = masks[np.argsort(scores[:,0])[::-1], :, :, :].astype(bool)
     if seg_map is None and occupancy_mask is None:
         seg_map = np.zeros_like(shorted_masks[0, 0, ...], dtype=np.uint16)
@@ -423,7 +426,7 @@ def iter_predict_seg(
                             mask = mask.astype(bool)
                     else:
                         # Apply morphological closing (dilation followed by erosion)
-                        mask = is_fully_connected(mask, kernel_size=150)
+                        mask = is_fully_connected(mask, kernel_size=100)
                         mask = mask.astype(bool)
                             
                     mask[occupancy_mask]=0
@@ -829,9 +832,9 @@ if __name__ == "__main__":
         print(f"the final number of second_stage labels: {len(np.unique(seg_map))}")
 
         temp_count = 0
-        for j in tqdm(range(8, 1, -1)):
-            for k in tqdm(range(10), leave = False):
-                erode_size = (j, j)
+        for j in tqdm(range(20)):
+            for k in tqdm(range(8, 0, -1), leave = False):
+                erode_size = (k, k)
                 false_coordinates = np.array(select_sparse_coordinates(occupancy_mask, erode_kernel_size=erode_size, dilate_kernel_size = erode_size))
                 if false_coordinates.shape[0] == 0:
                     continue
